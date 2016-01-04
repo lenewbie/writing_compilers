@@ -20,42 +20,101 @@ class SampleLexer {
 
   private def parseNonEmptyInput(sourceCode:Iterator[Char]):List[Token] = {
     var currentState:ParseState = StartState
-    val data = new ParseData(None, mutable.ListBuffer[Token](), new StringBuilder)
-    while (sourceCode.hasNext) {
-      val next = sourceCode.next()
-      val nexState = currentState.parse(next, data)
-      if(nexState.tokenClass.orNull == WHITESPACE && data.lastAcceptedState.isDefined) {
-        if(data.lastAcceptedState.get.tokenClass.orNull != WHITESPACE) {
-          data.tokens.append(new Token(data.lexemSoFar.toString, data.lastAcceptedState.get.tokenClass.get))
-          data.lexemSoFar.clear()
-        }
-      }
-      if(nexState.isFinal) {
-        data.lastAcceptedState = Some(nexState)
-      }
-      currentState = nexState
-      if(data.lastAcceptedState.get.tokenClass.orNull != WHITESPACE)
-        data.lexemSoFar.append(next)
-    }
-    if(currentState.tokenClass.isDefined && currentState.tokenClass.orNull != WHITESPACE) {
-      data.tokens.append(new Token(data.lexemSoFar.toString, currentState.tokenClass.get))
-    }
-    data.tokens.toList
+    val builder = new TokenBuilder()
+    sourceCode.foreach( next =>
+      currentState = currentState.processInput(next, builder)
+    )
+    builder.toList
   }
 }
 
-case class ParseData(var lastAcceptedState:Option[ParseState], tokens:mutable.ListBuffer[Token], lexemSoFar:StringBuilder)
+case class TokenBuilder() {
 
-trait ParseState {
-  def parse(input:Char,parseState:ParseData): ParseState = {
-    nextState(input)
+  def onFinalState(next: Char, state: FinalParseState): Unit = {
+    update(state)
+    if (hasNotPunctuation)
+      addToLexem(next)
   }
 
-  def nextState(input:Char): ParseState
+  def onNext(next: Char): Unit =
+    if (hasNotPunctuation)
+      addToLexem(next)
 
-  def isFinal:Boolean
+  def onPunctuation(next: Char, state:ParseState): Any = {
+    if (hasNotPunctuation)
+      finishToken()
+    update(state)
+    if (hasNotPunctuation)
+      addToLexem(next)
+  }
+
+  private var lastAcceptedState:Option[ParseState] = None
+  private val tokens = mutable.ListBuffer[Token]()
+  private val lexemSoFar = new StringBuilder
+
+  def finishToken(): Unit = {
+    tokens.append(new Token(lexemSoFar.toString, lastAcceptedState.get.tokenClass.get))
+    lexemSoFar.clear()
+  }
+
+  def addToLexem(next: Char) =
+    lexemSoFar.append(next)
+
+  def hasNotPunctuation: Boolean =
+    lastAcceptedState.isDefined && !lastAcceptedState.get.isPunctuation
+
+  def update(currentState: ParseState): Unit =
+    lastAcceptedState = Some(currentState)
+
+  def toList = {
+    if(hasNotPunctuation)
+      finishToken()
+    tokens.toList
+  }
+
+}
+
+trait ParseState {
 
   def tokenClass: Option[TokenClass]
+
+  def isPunctuation: Boolean
+
+  def processInput(input:Char, builder: TokenBuilder): ParseState = {
+    val nextState = getNextState(input)
+    nextState.updateBuilder(builder, input)
+    nextState
+  }
+
+  protected def updateBuilder(builder: TokenBuilder, next: Char): Unit
+
+  protected def getNextState(input:Char): ParseState
+}
+
+trait FinalParseState extends ParseState {
+
+  override def isPunctuation: Boolean = false
+
+  override def updateBuilder(builder: TokenBuilder, next: Char): Unit =
+    builder.onFinalState(next, this)
+}
+
+trait NotFinalParseState extends ParseState {
+
+  override def tokenClass: Option[TokenClass] = None
+
+  override def isPunctuation: Boolean = false
+
+  override def updateBuilder(builder: TokenBuilder, next: Char): Unit =
+    builder.onNext(next)
+}
+
+trait PunctuationParseState extends FinalParseState {
+
+  override def isPunctuation: Boolean = true
+
+  override def updateBuilder(builder: TokenBuilder, next: Char): Unit =
+    builder.onPunctuation(next, this)
 }
 
 // start state 1
@@ -63,16 +122,13 @@ trait ParseState {
 // on character go to state 4 (start of identifier)
 // on whitespace => 12 (whitespace)
 // on other => state 13 (error)
-case object StartState extends ParseState {
+case object StartState extends NotFinalParseState {
 
-  override def isFinal:Boolean = false
-  def tokenClass: Option[TokenClass] = None
-
-  override def nextState(input:Char): ParseState = {
-    if(input >= '0' && input <= '9') StateNumber
-    else if(input >= 'a' && input <= 'z') StateIdentifier
-    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') StateWhiteSpace
-    else StateError
+  override def getNextState(input:Char): ParseState = {
+    if(input >= '0' && input <= '9') NumberState
+    else if(input >= 'a' && input <= 'z') IdentifierState
+    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') WhiteSpaceState
+    else ErrorState
   }
 }
 
@@ -81,17 +137,15 @@ case object StartState extends ParseState {
 // on character loop (continueIdentifier)
 // on whitespace => 12 (whitespace)
 // on other => state 13 (error)
-case object StateIdentifier extends ParseState {
-
-  override def isFinal:Boolean = true
+case object IdentifierState extends FinalParseState {
 
   override def tokenClass = Some(ID)
 
-  override def nextState(input:Char): ParseState = {
-    if(input >= '0' && input <= '9') StateIdentifier
-    else if(input >= 'a' && input <= 'z') StateIdentifier
-    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') StateWhiteSpace
-    else StateError
+  override def getNextState(input:Char): ParseState = {
+    if(input >= '0' && input <= '9') IdentifierState
+    else if(input >= 'a' && input <= 'z') IdentifierState
+    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') WhiteSpaceState
+    else ErrorState
   }
 }
 
@@ -99,16 +153,14 @@ case object StateIdentifier extends ParseState {
 // on digit loop (continueInteger)
 // on whitespace => 12 (whitespace)
 // on other => state 13 (error)
-case object StateNumber extends ParseState {
-
-  override def isFinal:Boolean = true
+case object NumberState extends FinalParseState {
 
   override def tokenClass = Some(NUM)
 
-  override def nextState(input:Char): ParseState = {
-    if(input >= '0' && input <= '9') StateNumber
-    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') StateWhiteSpace
-    else StateError
+  override def getNextState(input:Char): ParseState = {
+    if(input >= '0' && input <= '9') NumberState
+    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') WhiteSpaceState
+    else ErrorState
   }
 
 }
@@ -118,26 +170,22 @@ case object StateNumber extends ParseState {
 // on character go to state 4 (start of identifier)
 // on whitespace => loop (continueWhitespace)
 // on other => state 13 (error)
-case object StateWhiteSpace extends ParseState {
+case object WhiteSpaceState extends PunctuationParseState {
 
   override def tokenClass = Some(WHITESPACE)
 
-  override def isFinal:Boolean = true
-
-  override def nextState(input:Char): ParseState =
-    if(input >= '0' && input <= '9') StateNumber
-    else if(input >= 'a' && input <= 'z') StateIdentifier
-    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') StateWhiteSpace
-    else StateError
+  override def getNextState(input:Char): ParseState =
+    if(input >= '0' && input <= '9') NumberState
+    else if(input >= 'a' && input <= 'z') IdentifierState
+    else if(input == '\t' || input == '\n' || input == ' ' || input == '\r') WhiteSpaceState
+    else ErrorState
 }
 
-case object StateError extends ParseState {
+case object ErrorState extends FinalParseState {
 
   override def tokenClass = Some(ERROR)
 
-  override def isFinal:Boolean = true
-
-  override def nextState(input:Char): ParseState =
-    if(input == '\t' || input == '\n' || input == ' ' || input == '\r') StateWhiteSpace
-    else StateError
+  override def getNextState(input:Char): ParseState =
+    if(input == '\t' || input == '\n' || input == ' ' || input == '\r') WhiteSpaceState
+    else ErrorState
 }
